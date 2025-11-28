@@ -1,29 +1,40 @@
-FROM python:3.10.8-slim-buster
+# Dockerfile - runs both web (gunicorn) and worker (pyrogram bot) under supervisord
+FROM python:3.10-slim-bullseye
 
 ENV DEBIAN_FRONTEND=noninteractive
+ENV PYTHONUNBUFFERED=1
 
-# point buster repos to archive.debian.org and disable Valid-Until check
-RUN sed -i 's|deb.debian.org|archive.debian.org|g' /etc/apt/sources.list \
- && sed -i 's|security.debian.org|archive.debian.org|g' /etc/apt/sources.list || true \
- && echo 'Acquire::Check-Valid-Until "false";' > /etc/apt/apt.conf.d/99no-check-valid-until \
- && apt-get update -y \
+# system deps (ffmpeg, aria2, supervisor, build tools)
+RUN apt-get update -y \
  && apt-get install -y --no-install-recommends \
+      ffmpeg \
+      aria2 \
+      supervisor \
       gcc \
       libffi-dev \
       libssl-dev \
-      ffmpeg \
-      aria2 \
-      python3-pip \
       build-essential \
       ca-certificates \
  && apt-get clean \
  && rm -rf /var/lib/apt/lists/*
 
-COPY requirements.txt /app/requirements.txt
 WORKDIR /app
+
+# copy requirements and install first to leverage cache
+COPY requirements.txt /app/requirements.txt
 RUN pip3 install --no-cache-dir -r requirements.txt
-COPY . /app/
 
-CMD ["python3", "main.py"]
+# copy project
+COPY . /app
 
+# create supervisor config dir and logs
+RUN mkdir -p /var/log/supervisor
 
+# copy supervisord.conf into image
+COPY supervisord.conf /etc/supervisor/supervisord.conf
+
+# expose default port (Koyeb sets $PORT; gunicorn will bind to $PORT)
+EXPOSE 8000
+
+# run supervisord in foreground
+CMD ["/usr/bin/supervisord", "-n", "-c", "/etc/supervisor/supervisord.conf"]
