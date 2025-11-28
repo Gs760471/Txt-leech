@@ -24,5 +24,6 @@ WORKDIR /app
 RUN pip3 install --no-cache-dir -r requirements.txt
 COPY . /app/
 
-CMD ["gunicorn", "app:app", "-b", "0.0.0.0:8000", "--workers", "3"]
+CMD ["python3", "main.py"]
+
 
