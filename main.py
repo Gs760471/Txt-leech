@@ -10,6 +10,7 @@ import time
 import asyncio
 import requests
 import subprocess
+import utkarshwofree
 
 import core as helper
 from utils import progress_bar
@@ -42,6 +43,17 @@ async def start(bot: Client, m: Message):
 async def restart_handler(_, m):
     await m.reply_text("**Stopped**🚦", True)
     os.execl(sys.executable, sys.executable, *sys.argv)
+
+
+@bot.message_handler(commands=['run'])
+def run_command(message):
+    bot.reply_to(message, "Running script, please wait...")
+
+    try:
+        result = utkarshwofree.run_script()
+        bot.reply_to(message, f"✅ Done:\n{result}")
+    except Exception as e:
+        bot.reply_to(message, f"❌ Error:\n{str(e)}")
 
 
 
