@@ -12,6 +12,9 @@ API_URL = "https://application.utkarshapp.com/index.php/data_model"
 COMMON_KEY = b"%!^F&^$)&^$&*$^&"   # 16 bytes
 COMMON_IV  = b"#*v$JvywJvyJDyvJ"   # 16 bytes
 
+STREAM_KEY = b"%!$!%_$&!%F)&^!^"
+STREAM_IV  = b"#*y*#2yJ*#$wJv*v"
+
 key_chars = "%!F*&^$)_*%3f&B+"
 iv_chars  = "#*$DJvyw2w%!_-$@"
 
@@ -26,17 +29,21 @@ HEADERS = {
     "version": "152"
 }
 
-# ================= CRYPTO =================
+# ================= AES HELPERS =================
+
+def _valid_key_iv(key, iv):
+    return key and iv and len(key) == 16 and len(iv) == 16
+
 
 def encrypt(data, use_common_key=False, key=None, iv=None):
     cipher_key, cipher_iv = (COMMON_KEY, COMMON_IV) if use_common_key else (key, iv)
 
-    if not cipher_key or not cipher_iv or len(cipher_key) != 16 or len(cipher_iv) != 16:
-        raise Exception("Invalid AES key/IV length")
+    if not _valid_key_iv(cipher_key, cipher_iv):
+        raise Exception("Invalid AES key or IV")
 
     cipher = AES.new(cipher_key, AES.MODE_CBC, cipher_iv)
-    padded = pad(json.dumps(data, separators=(",", ":")).encode(), AES.block_size)
-    return b64encode(cipher.encrypt(padded)).decode() + ":"
+    raw = json.dumps(data, separators=(",", ":")).encode()
+    return b64encode(cipher.encrypt(pad(raw, AES.block_size))).decode() + ":"
 
 
 def decrypt(data, use_common_key=False, key=None, iv=None):
@@ -45,8 +52,7 @@ def decrypt(data, use_common_key=False, key=None, iv=None):
             return None
 
         cipher_key, cipher_iv = (COMMON_KEY, COMMON_IV) if use_common_key else (key, iv)
-
-        if not cipher_key or not cipher_iv or len(cipher_key) != 16 or len(cipher_iv) != 16:
+        if not _valid_key_iv(cipher_key, cipher_iv):
             return None
 
         cipher = AES.new(cipher_key, AES.MODE_CBC, cipher_iv)
@@ -55,46 +61,54 @@ def decrypt(data, use_common_key=False, key=None, iv=None):
 
         return unpad(decrypted, AES.block_size).decode()
 
-    except ValueError:
-        # Padding error
-        return None
     except Exception:
         return None
 
 
 def post_request(path, data=None, use_common_key=False, key=None, iv=None):
-    encrypted_data = encrypt(data, use_common_key, key, iv) if data else data
-    r = requests.post(API_URL + path, headers=HEADERS, data=encrypted_data)
+    payload = encrypt(data, use_common_key, key, iv) if data else data
+    r = requests.post(API_URL + path, headers=HEADERS, data=payload)
 
     decrypted = decrypt(r.text, use_common_key, key, iv)
     if not decrypted:
-        raise Exception("Decryption failed (invalid padding or response)")
+        raise Exception("Invalid encrypted response from server")
 
     return json.loads(decrypted)
 
-
-# ---------- STREAM ENCRYPT / DECRYPT ----------
-
-STREAM_KEY = b'%!$!%_$&!%F)&^!^'
-STREAM_IV  = b'#*y*#2yJ*#$wJv*v'
+# ================= STREAM CRYPTO =================
 
 def encrypt_stream(text):
     cipher = AES.new(STREAM_KEY, AES.MODE_CBC, STREAM_IV)
     return b64encode(cipher.encrypt(pad(text.encode(), AES.block_size))).decode()
 
+
 def decrypt_stream(enc):
     try:
+        if not enc or not isinstance(enc, str):
+            return None
+
+        raw = b64decode(enc)
         cipher = AES.new(STREAM_KEY, AES.MODE_CBC, STREAM_IV)
-        decrypted = cipher.decrypt(b64decode(enc))
-        return unpad(decrypted, AES.block_size).decode(errors="ignore")
+        decrypted = cipher.decrypt(raw)
+
+        try:
+            return unpad(decrypted, AES.block_size).decode("utf-8")
+        except ValueError:
+            return None
+
     except Exception:
         return None
+
 
 def decrypt_and_load_json(enc):
     data = decrypt_stream(enc)
     if not data:
-        raise Exception("Stream decryption failed")
-    return json.loads(data)
+        raise Exception("Invalid or unencrypted server response")
+
+    try:
+        return json.loads(data)
+    except json.JSONDecodeError:
+        raise Exception("Decrypted data is not valid JSON")
 
 # ================= MAIN FUNCTION =================
 
@@ -111,7 +125,7 @@ def run_script(email, password, batch_id):
     r = session.get("https://online.utkarsh.com/")
     csrf = r.cookies.get("csrf_name")
     if not csrf:
-        raise Exception("CSRF token not found")
+        raise Exception("Failed to get CSRF token")
 
     # ---------- LOGIN ----------
     login_payload = {
@@ -134,12 +148,26 @@ def run_script(email, password, batch_id):
         headers=login_headers
     ).json()
 
-    login_data = decrypt_and_load_json(login_resp.get("response"))
+    if "response" not in login_resp:
+        raise Exception("Login failed (no response)")
+
+    login_data = decrypt_and_load_json(login_resp["response"])
+
+    if not isinstance(login_data, dict):
+        raise Exception("Login failed (invalid response)")
+
+    if "data" not in login_data or "jwt" not in login_data["data"]:
+        raise Exception("Login failed (wrong credentials)")
+
     jwt = login_data["data"]["jwt"]
     HEADERS["jwt"] = jwt
 
     # ---------- PROFILE ----------
     profile = post_request("/users/get_my_profile", use_common_key=True)
+
+    if not isinstance(profile, dict) or "data" not in profile:
+        raise Exception("Failed to fetch profile")
+
     user_id = profile["data"]["id"]
     HEADERS["userid"] = user_id
 
@@ -147,7 +175,7 @@ def run_script(email, password, batch_id):
     key = "".join(key_chars[int(i)] for i in (user_id + "1524567456436545")[:16]).encode()
     iv  = "".join(iv_chars[int(i)] for i in (user_id + "1524567456436545")[:16]).encode()
 
-    if len(key) != 16 or len(iv) != 16:
+    if not _valid_key_iv(key, iv):
         raise Exception("Generated AES key/IV invalid")
 
     # ---------- COURSE DATA ----------
@@ -167,19 +195,28 @@ def run_script(email, password, batch_id):
         data={"tile_input": enc, "csrf_name": csrf}
     ).json()
 
-    data = decrypt_and_load_json(r.get("response"))
+    if "response" not in r:
+        raise Exception("Invalid course response")
+
+    course_data = decrypt_and_load_json(r["response"])
+
+    if not isinstance(course_data, dict) or "data" not in course_data:
+        raise Exception("No course data found")
 
     # ---------- SAVE OUTPUT ----------
-    for course in data.get("data", []):
-        fname = f"{course['id']}_{course['title'].replace('/','_')}.txt"
+    for course in course_data["data"]:
+        title = course.get("title", "unknown")
+        cid = course.get("id", "0")
+
+        fname = f"{cid}_{title.replace('/','_').replace(':','_')}.txt"
         generated_files.append(fname)
 
         with open(fname, "w", encoding="utf-8") as f:
-            f.write(course["title"] + "\n")
+            f.write(title + "\n")
 
     return generated_files
 
 
-# DO NOT AUTO RUN
+# IMPORTANT: DO NOT AUTO RUN
 if __name__ == "__main__":
     pass
