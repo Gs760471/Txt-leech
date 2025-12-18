@@ -1,17 +1,19 @@
 import requests
 import json
-from Crypto.Cipher import AES
-from Crypto.Util.Padding import unpad, pad
-from base64 import b64decode, b64encode
 import base64
+from base64 import b64decode, b64encode
+from Crypto.Cipher import AES
+from Crypto.Util.Padding import pad, unpad
 
 # ================= CONFIG =================
 
 API_URL = "https://application.utkarshapp.com/index.php/data_model"
-COMMON_KEY = b"%!^F&^$)&^$&*$^&"
-COMMON_IV = b"#*v$JvywJvyJDyvJ"
+
+COMMON_KEY = b"%!^F&^$)&^$&*$^&"   # 16 bytes
+COMMON_IV  = b"#*v$JvywJvyJDyvJ"   # 16 bytes
+
 key_chars = "%!F*&^$)_*%3f&B+"
-iv_chars = "#*$DJvyw2w%!_-$@"
+iv_chars  = "#*$DJvyw2w%!_-$@"
 
 HEADERS = {
     "Authorization": "Bearer 152#svf346t45ybrer34yredk76t",
@@ -26,57 +28,93 @@ HEADERS = {
 
 # ================= CRYPTO =================
 
-def encrypt(data, use_common_key, key, iv):
+def encrypt(data, use_common_key=False, key=None, iv=None):
     cipher_key, cipher_iv = (COMMON_KEY, COMMON_IV) if use_common_key else (key, iv)
+
+    if not cipher_key or not cipher_iv or len(cipher_key) != 16 or len(cipher_iv) != 16:
+        raise Exception("Invalid AES key/IV length")
+
     cipher = AES.new(cipher_key, AES.MODE_CBC, cipher_iv)
     padded = pad(json.dumps(data, separators=(",", ":")).encode(), AES.block_size)
     return b64encode(cipher.encrypt(padded)).decode() + ":"
 
-def decrypt(data, use_common_key, key, iv):
-    cipher_key, cipher_iv = (COMMON_KEY, COMMON_IV) if use_common_key else (key, iv)
-    cipher = AES.new(cipher_key, AES.MODE_CBC, cipher_iv)
-    encrypted = b64decode(data.split(":")[0])
-    return unpad(cipher.decrypt(encrypted), AES.block_size).decode()
+
+def decrypt(data, use_common_key=False, key=None, iv=None):
+    try:
+        if not data or ":" not in data:
+            return None
+
+        cipher_key, cipher_iv = (COMMON_KEY, COMMON_IV) if use_common_key else (key, iv)
+
+        if not cipher_key or not cipher_iv or len(cipher_key) != 16 or len(cipher_iv) != 16:
+            return None
+
+        cipher = AES.new(cipher_key, AES.MODE_CBC, cipher_iv)
+        encrypted = b64decode(data.split(":")[0])
+        decrypted = cipher.decrypt(encrypted)
+
+        return unpad(decrypted, AES.block_size).decode()
+
+    except ValueError:
+        # Padding error
+        return None
+    except Exception:
+        return None
+
 
 def post_request(path, data=None, use_common_key=False, key=None, iv=None):
-    enc = encrypt(data, use_common_key, key, iv) if data else data
-    r = requests.post(API_URL + path, headers=HEADERS, data=enc)
-    return json.loads(decrypt(r.text, use_common_key, key, iv))
+    encrypted_data = encrypt(data, use_common_key, key, iv) if data else data
+    r = requests.post(API_URL + path, headers=HEADERS, data=encrypted_data)
+
+    decrypted = decrypt(r.text, use_common_key, key, iv)
+    if not decrypted:
+        raise Exception("Decryption failed (invalid padding or response)")
+
+    return json.loads(decrypted)
+
+
+# ---------- STREAM ENCRYPT / DECRYPT ----------
+
+STREAM_KEY = b'%!$!%_$&!%F)&^!^'
+STREAM_IV  = b'#*y*#2yJ*#$wJv*v'
+
+def encrypt_stream(text):
+    cipher = AES.new(STREAM_KEY, AES.MODE_CBC, STREAM_IV)
+    return b64encode(cipher.encrypt(pad(text.encode(), AES.block_size))).decode()
 
 def decrypt_stream(enc):
-    key = b'%!$!%_$&!%F)&^!^'
-    iv = b'#*y*#2yJ*#$wJv*v'
-    cipher = AES.new(key, AES.MODE_CBC, iv)
-    decrypted = cipher.decrypt(b64decode(enc))
-    return unpad(decrypted, AES.block_size).decode(errors="ignore")
+    try:
+        cipher = AES.new(STREAM_KEY, AES.MODE_CBC, STREAM_IV)
+        decrypted = cipher.decrypt(b64decode(enc))
+        return unpad(decrypted, AES.block_size).decode(errors="ignore")
+    except Exception:
+        return None
 
 def decrypt_and_load_json(enc):
-    return json.loads(decrypt_stream(enc))
+    data = decrypt_stream(enc)
+    if not data:
+        raise Exception("Stream decryption failed")
+    return json.loads(data)
 
-def encrypt_stream(txt):
-    key = b'%!$!%_$&!%F)&^!^'
-    iv = b'#*y*#2yJ*#$wJv*v'
-    cipher = AES.new(key, AES.MODE_CBC, iv)
-    return b64encode(cipher.encrypt(pad(txt.encode(), AES.block_size))).decode()
-
-# ================= MAIN LOGIC =================
+# ================= MAIN FUNCTION =================
 
 def run_script(email, password, batch_id):
     """
-    Runs extractor and returns list of generated txt files
+    Telegram-safe function
+    Returns list of generated .txt files
     """
 
     session = requests.Session()
     generated_files = []
 
     # ---------- CSRF ----------
-    csrf = session.get("https://online.utkarsh.com/").cookies.get("csrf_name")
+    r = session.get("https://online.utkarsh.com/")
+    csrf = r.cookies.get("csrf_name")
     if not csrf:
         raise Exception("CSRF token not found")
 
     # ---------- LOGIN ----------
-    login_url = "https://online.utkarsh.com/web/Auth/login"
-    payload = {
+    login_payload = {
         "csrf_name": csrf,
         "mobile": email,
         "password": password,
@@ -85,25 +123,34 @@ def run_script(email, password, batch_id):
         "device_token": "null"
     }
 
-    headers = {
+    login_headers = {
         "Content-Type": "application/x-www-form-urlencoded; charset=UTF-8",
         "X-Requested-With": "XMLHttpRequest"
     }
 
-    resp = session.post(login_url, data=payload, headers=headers).json()
-    data = decrypt_and_load_json(resp["response"])
+    login_resp = session.post(
+        "https://online.utkarsh.com/web/Auth/login",
+        data=login_payload,
+        headers=login_headers
+    ).json()
 
-    HEADERS["jwt"] = data["data"]["jwt"]
+    login_data = decrypt_and_load_json(login_resp.get("response"))
+    jwt = login_data["data"]["jwt"]
+    HEADERS["jwt"] = jwt
 
     # ---------- PROFILE ----------
     profile = post_request("/users/get_my_profile", use_common_key=True)
     user_id = profile["data"]["id"]
     HEADERS["userid"] = user_id
 
+    # ---------- USER KEY ----------
     key = "".join(key_chars[int(i)] for i in (user_id + "1524567456436545")[:16]).encode()
-    iv = "".join(iv_chars[int(i)] for i in (user_id + "1524567456436545")[:16]).encode()
+    iv  = "".join(iv_chars[int(i)] for i in (user_id + "1524567456436545")[:16]).encode()
 
-    # ---------- COURSE ----------
+    if len(key) != 16 or len(iv) != 16:
+        raise Exception("Generated AES key/IV invalid")
+
+    # ---------- COURSE DATA ----------
     tiles_url = "https://online.utkarsh.com/web/Course/tiles_data"
 
     payload = {
@@ -115,19 +162,24 @@ def run_script(email, password, batch_id):
     }
 
     enc = encrypt_stream(json.dumps(payload))
-    r = session.post(tiles_url, data={"tile_input": enc, "csrf_name": csrf}).json()
-    data = decrypt_and_load_json(r["response"])
+    r = session.post(
+        tiles_url,
+        data={"tile_input": enc, "csrf_name": csrf}
+    ).json()
 
-    for course in data["data"]:
-        filename = f"{course['id']}_{course['title'].replace('/','_')}.txt"
-        generated_files.append(filename)
+    data = decrypt_and_load_json(r.get("response"))
 
-        with open(filename, "w", encoding="utf-8") as f:
+    # ---------- SAVE OUTPUT ----------
+    for course in data.get("data", []):
+        fname = f"{course['id']}_{course['title'].replace('/','_')}.txt"
+        generated_files.append(fname)
+
+        with open(fname, "w", encoding="utf-8") as f:
             f.write(course["title"] + "\n")
 
     return generated_files
 
 
-# IMPORTANT: DO NOT AUTO-RUN
+# DO NOT AUTO RUN
 if __name__ == "__main__":
     pass
